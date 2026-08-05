@@ -24,7 +24,23 @@
 
 	soc {
 		i2c_2:i2c@c176000 {   // // [Modified] QUP_BASE address for BLSP# QUP# (ref. AP datasheet, This model use BLSP-1 QUP1)
-			status = "disable";
+			/*
+			 * The released source leaves this bus off, so the tuner hanging
+			 * off it never probes. broadcast_fc8300 keeps the i2c_client from
+			 * probe in IsdbCtrlInfo.pdev and dereferences it the first time
+			 * userspace powers the tuner on, so with no probe the very first
+			 * LGE_BROADCAST_DMB_IOCTL_ON takes the kernel down:
+			 *
+			 *   Kernel BUG at _regulator_get+0x48
+			 *     broadcast_isdbt_set_regulator <- devm_regulator_get(NULL)
+			 *     fc8300_power_on
+			 *     broadcast_dmb_ioctl_control
+			 *
+			 * The stock L-01K boot image has this same node with status "ok"
+			 * and an otherwise identical tcc3535_i2c@58 child, so this is
+			 * only restoring what the shipping device runs with.
+			 */
+			status = "ok";
             
 			/* [Modified] If use spi interface, Should be "qcom,spi-qup-v2".
 			          If use i2c interface, Should be "qcom,i2c-msm-v2". */            
