@@ -54,19 +54,25 @@ ifeq ($(CONFIG_MACH_MSM8998_JOAN_ACG_US),y)
 DTS_TARGET := msm8998-joan_acg_us
 endif
 
+# The two japanese SKUs accumulate rather than overwrite: one build serves
+# both, and the bootloader picks the matching appended DTB by board id. The
+# config symbols only ever reach this file and two `KDDI_JP || DCM_JP` guards
+# that are already satisfied by either, so turning both on changes nothing but
+# which device trees get built.
 ifeq ($(CONFIG_MACH_MSM8998_JOAN_KDDI_JP),y)
-DTS_TARGET := msm8998-joan_kddi_jp
+DTS_TARGET += msm8998-joan_kddi_jp
 endif
 
 ifeq ($(CONFIG_MACH_MSM8998_JOAN_DCM_JP),y)
-DTS_TARGET := msm8998-joan_dcm_jp
+DTS_TARGET += msm8998-joan_dcm_jp
 endif
 
 ifeq ($(CONFIG_MACH_MSM8998_JOAN_GLOBAL_LDU),y)
 DTS_TARGET := msm8998-joan_global_ldu
 endif
 
-ALL_DTS := $(notdir $(wildcard echo $(srctree)/$(src)/$(DTS_PROJECT)/$(DTS_TARGET)/*.dts))
+ALL_DTS := $(notdir $(wildcard $(addsuffix /*.dts,\
+		$(addprefix $(srctree)/$(src)/$(DTS_PROJECT)/,$(DTS_TARGET)))))
 dtb-y += $(patsubst %.dts,%.dtb,$(ALL_DTS))
 
 DTB_NAMES := $(subst $\",,$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES))
@@ -78,7 +84,14 @@ endif
 
 always  := $(addprefix ../,$(DTB_LIST))
 
-$(obj)/../%.dtb: $(src)/$(DTS_PROJECT)/$(DTS_TARGET)/%.dts FORCE
-	$(call if_changed_dep,dtc)
+# One rule per target, since the prerequisite path cannot hold a list. Make
+# picks whichever rule finds its .dts, and with a single target this is the
+# rule that was here before.
+define dts_target_rule
+$(obj)/../%.dtb: $(src)/$(DTS_PROJECT)/$(1)/%.dts FORCE
+	$$(call if_changed_dep,dtc)
+endef
+
+$(foreach t,$(DTS_TARGET),$(eval $(call dts_target_rule,$(t))))
 
 clean-files := *.dtb
