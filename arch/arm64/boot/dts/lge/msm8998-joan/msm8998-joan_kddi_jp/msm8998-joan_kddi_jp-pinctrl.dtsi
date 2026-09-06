@@ -13,10 +13,19 @@
 #include "../msm8998-joan-common/msm8998-joan-common-pinctrl.dtsi"
 
 &tlmm {
-	/delete-node/ i2c_2;
-	/delete-node/ spi_2;
-	/delete-node/ blsp1_uart2_active;
-	/delete-node/ blsp1_uart2_sleep;
+	/*
+	 * This used to delete i2c_2, spi_2 and the two blsp1_uart2 states. They
+	 * are BLSP1 QUP2 on gpio31-34, which nothing on this SKU claims, and
+	 * their three consumers in the qcom dtsi are all disabled - but those
+	 * consumers still name the states, so dtc refuses the tree over the
+	 * dangling phandles and no kddi_jp device tree could be built at all.
+	 *
+	 * The shipping tree does not delete them either: the DTB for board-id
+	 * 0xc08 out of a stock LGV35 boot image carries i2c_2, spi_2, both
+	 * blsp1_uart2 states and i2c_2_bitbang, with the consumers' pinctrl
+	 * phandles resolved, alongside the tsif nodes added below. dcm_jp, the
+	 * variant that boots today, never deleted them.
+	 */
 
 	/* pin set for Hall IC */
 	hallic_gpio {
