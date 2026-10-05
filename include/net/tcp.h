@@ -560,6 +560,7 @@ static inline void tcp_synq_overflow(const struct sock *sk)
 static inline bool tcp_synq_no_recent_overflow(const struct sock *sk)
 {
 	unsigned long last_overflow;
+	unsigned long now = jiffies;
 
 	if (sk->sk_reuseport) {
 		struct sock_reuseport *reuse;

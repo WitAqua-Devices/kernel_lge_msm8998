@@ -263,6 +263,13 @@ static __always_inline void timespec_add_ns(struct timespec *a, u64 ns)
 	a->tv_nsec = ns;
 }
 
+/*
+ * These deal with 32-bit timestamps the way time_after() and time_before()
+ * deal with jiffies, wrapping included.
+ */
+#define time_after32(a, b)	((s32)((u32)(b) - (u32)(a)) < 0)
+#define time_before32(b, a)	time_after32(a, b)
+
 /**
  * time_between32 - check if a 32-bit timestamp is within a given time range
  * @t:	the time which may be within [l,h]
