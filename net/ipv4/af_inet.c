@@ -450,23 +450,37 @@ EXPORT_SYMBOL(inet_release);
 
 int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
-	struct sockaddr_in *addr = (struct sockaddr_in *)uaddr;
 	struct sock *sk = sock->sk;
+	int err;
+
+	/* If the socket has its own bind function then use it. (RAW) */
+	if (sk->sk_prot->bind) {
+		return sk->sk_prot->bind(sk, uaddr, addr_len);
+	}
+	if (addr_len < sizeof(struct sockaddr_in))
+		return -EINVAL;
+
+	/* BPF prog is run before any checks are done so that if the prog
+	 * changes context in a wrong way it will be caught.
+	 */
+	err = BPF_CGROUP_RUN_PROG_INET4_BIND(sk, uaddr);
+	if (err)
+		return err;
+
+	return __inet_bind(sk, uaddr, addr_len, false, true);
+}
+EXPORT_SYMBOL(inet_bind);
+
+int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
+		bool force_bind_address_no_port, bool with_lock)
+{
+	struct sockaddr_in *addr = (struct sockaddr_in *)uaddr;
 	struct inet_sock *inet = inet_sk(sk);
 	struct net *net = sock_net(sk);
 	unsigned short snum;
 	int chk_addr_ret;
 	u32 tb_id = RT_TABLE_LOCAL;
 	int err;
-
-	/* If the socket has its own bind function then use it. (RAW) */
-	if (sk->sk_prot->bind) {
-		err = sk->sk_prot->bind(sk, uaddr, addr_len);
-		goto out;
-	}
-	err = -EINVAL;
-	if (addr_len < sizeof(struct sockaddr_in))
-		goto out;
 
 	if (addr->sin_family != AF_INET) {
 		/* Compatibility games : accept AF_UNSPEC (mapped to AF_INET)
@@ -510,7 +524,8 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	 *      would be illegal to use them (multicast/broadcast) in
 	 *      which case the sending device address is used.
 	 */
-	lock_sock(sk);
+	if (with_lock)
+		lock_sock(sk);
 
 	/* Check these errors (active socket, double bind). */
 	err = -EINVAL;
@@ -522,11 +537,18 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		inet->inet_saddr = 0;  /* Use device */
 
 	/* Make sure we are allowed to bind here. */
-	if ((snum || !inet->bind_address_no_port) &&
-	    sk->sk_prot->get_port(sk, snum)) {
-		inet->inet_saddr = inet->inet_rcv_saddr = 0;
-		err = -EADDRINUSE;
-		goto out_release_sock;
+	if (snum || !(inet->bind_address_no_port ||
+		      force_bind_address_no_port)) {
+		if (sk->sk_prot->get_port(sk, snum)) {
+			inet->inet_saddr = inet->inet_rcv_saddr = 0;
+			err = -EADDRINUSE;
+			goto out_release_sock;
+		}
+		err = BPF_CGROUP_RUN_PROG_INET4_POST_BIND(sk);
+		if (err) {
+			inet->inet_saddr = inet->inet_rcv_saddr = 0;
+			goto out_release_sock;
+		}
 	}
 
 	if (inet->inet_rcv_saddr)
@@ -539,17 +561,18 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	sk_dst_reset(sk);
 	err = 0;
 out_release_sock:
-	release_sock(sk);
+	if (with_lock)
+		release_sock(sk);
 out:
 	return err;
 }
-EXPORT_SYMBOL(inet_bind);
 
 int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,
 		       int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
 	const struct proto *prot;
+	int err;
 
 	if (addr_len < sizeof(uaddr->sa_family))
 		return -EINVAL;
@@ -559,6 +582,12 @@ int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,
 
 	if (uaddr->sa_family == AF_UNSPEC)
 		return prot->disconnect(sk, flags);
+
+	if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
+		err = prot->pre_connect(sk, uaddr, addr_len);
+		if (err)
+			return err;
+	}
 
 	if (!inet_sk(sk)->inet_num && inet_autobind(sk))
 		return -EAGAIN;
@@ -596,19 +625,30 @@ static long inet_wait_for_connect(struct sock *sk, long timeo, int writebias)
  *	TCP 'magic' in here.
  */
 int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
-			  int addr_len, int flags)
+			  int addr_len, int flags, int is_sendmsg)
 {
 	struct sock *sk = sock->sk;
 	int err;
 	long timeo;
 
-	if (addr_len < sizeof(uaddr->sa_family))
-		return -EINVAL;
+	/*
+	 * uaddr can be NULL and addr_len can be 0 if:
+	 * sk is a TCP fastopen active socket and
+	 * TCP_FASTOPEN_CONNECT sockopt is set and
+	 * we already have a valid cookie for this socket.
+	 * In this case, user can call write() after connect().
+	 * write() will invoke tcp_sendmsg_fastopen() which calls
+	 * __inet_stream_connect().
+	 */
+	if (uaddr) {
+		if (addr_len < sizeof(uaddr->sa_family))
+			return -EINVAL;
 
-	if (uaddr->sa_family == AF_UNSPEC) {
-		err = sk->sk_prot->disconnect(sk, flags);
-		sock->state = err ? SS_DISCONNECTING : SS_UNCONNECTED;
-		goto out;
+		if (uaddr->sa_family == AF_UNSPEC) {
+			err = sk->sk_prot->disconnect(sk, flags);
+			sock->state = err ? SS_DISCONNECTING : SS_UNCONNECTED;
+			goto out;
+		}
 	}
 
 	switch (sock->state) {
@@ -619,7 +659,10 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 		err = -EISCONN;
 		goto out;
 	case SS_CONNECTING:
-		err = -EALREADY;
+		if (inet_sk(sk)->defer_connect)
+			err = is_sendmsg ? -EINPROGRESS : -EISCONN;
+		else
+			err = -EALREADY;
 		/* Fall out of switch with err, set for this state */
 		break;
 	case SS_UNCONNECTED:
@@ -627,11 +670,21 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 		if (sk->sk_state != TCP_CLOSE)
 			goto out;
 
+		if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
+			err = sk->sk_prot->pre_connect(sk, uaddr, addr_len);
+			if (err)
+				goto out;
+		}
+
+
 		err = sk->sk_prot->connect(sk, uaddr, addr_len);
 		if (err < 0)
 			goto out;
 
 		sock->state = SS_CONNECTING;
+
+		if (!err && inet_sk(sk)->defer_connect)
+			goto out;
 
 		/* Just entered SS_CONNECTING state; the only
 		 * difference is that return value in non-blocking
@@ -688,7 +741,7 @@ int inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	int err;
 
 	lock_sock(sock->sk);
-	err = __inet_stream_connect(sock, uaddr, addr_len, flags);
+	err = __inet_stream_connect(sock, uaddr, addr_len, flags, 0);
 	release_sock(sock->sk);
 	return err;
 }
@@ -698,13 +751,14 @@ EXPORT_SYMBOL(inet_stream_connect);
  *	Accept a pending connection. The TCP layer now gives BSD semantics.
  */
 
-int inet_accept(struct socket *sock, struct socket *newsock, int flags)
+int inet_accept(struct socket *sock, struct socket *newsock, int flags,
+		bool kern)
 {
 	struct sock *sk1 = sock->sk, *sk2;
 	int err = -EINVAL;
 
 	/* IPV6_ADDRFORM can change sk->sk_prot under us. */
-	sk2 = READ_ONCE(sk1->sk_prot)->accept(sk1, flags, &err);
+	sk2 = READ_ONCE(sk1->sk_prot)->accept(sk1, flags, &err, kern);
 	if (!sk2)
 		goto do_err;
 
@@ -964,6 +1018,10 @@ const struct proto_ops inet_stream_ops = {
 	.mmap		   = sock_no_mmap,
 	.sendpage	   = inet_sendpage,
 	.splice_read	   = tcp_splice_read,
+	.read_sock	   = tcp_read_sock,
+	.peek_len	   = tcp_peek_len,
+	.sendmsg_locked    = tcp_sendmsg_locked,
+	.sendpage_locked   = tcp_sendpage_locked,
 #ifdef CONFIG_COMPAT
 	.compat_setsockopt = compat_sock_common_setsockopt,
 	.compat_getsockopt = compat_sock_common_getsockopt,

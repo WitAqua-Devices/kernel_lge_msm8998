@@ -538,11 +538,8 @@ void tcp_init_metrics(struct sock *sk)
 			tp->snd_ssthresh = tp->snd_cwnd_clamp;
 	}
 	val = tcp_metric_get(tm, TCP_METRIC_REORDERING);
-	if (val && tp->reordering != val) {
-		tcp_disable_fack(tp);
-		tcp_disable_early_retrans(tp);
+	if (val && tp->reordering != val)
 		tp->reordering = val;
-	}
 
 	crtt = tcp_metric_get(tm, TCP_METRIC_RTT);
 	rcu_read_unlock();
@@ -592,7 +589,7 @@ reset:
 		tp->snd_cwnd = 1;
 	else
 		tp->snd_cwnd = tcp_init_cwnd(tp, dst);
-	tp->snd_cwnd_stamp = tcp_time_stamp;
+	tp->snd_cwnd_stamp = tcp_jiffies32;
 }
 
 bool tcp_peer_is_proven(struct request_sock *req, struct dst_entry *dst,
