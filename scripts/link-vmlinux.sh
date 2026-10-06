@@ -158,9 +158,19 @@ gen_btf()
 		return 1
 	fi
 
+	# Newer pahole encodes BTF kinds this kernel's BTF parser predates
+	# (DECL_TAG, TYPE_TAG, ENUM64), and the kernel rejects the whole
+	# blob over one of them. Leave them out when pahole knows how to.
+	local pahole_flags=""
+	for kind in decl_tag type_tag enum64; do
+		if ${PAHOLE} --help 2>&1 | grep -q -- "--skip_encoding_btf_${kind}"; then
+			pahole_flags="${pahole_flags} --skip_encoding_btf_${kind}"
+		fi
+	done
+
 	info "BTF" ${2}
 	vmlinux_link ${1}
-	LLVM_OBJCOPY=${OBJCOPY} ${PAHOLE} -J ${1}
+	LLVM_OBJCOPY=${OBJCOPY} ${PAHOLE} -J ${pahole_flags} ${1}
 
 	# Create ${2} which contains just .BTF section but no symbols. Add
 	# SHF_ALLOC because .BTF will be part of the vmlinux image. --strip-all
